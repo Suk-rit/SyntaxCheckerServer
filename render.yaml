@@ -16,4 +16,9 @@ services:
     docker:
       runtime: runc
       command: node server.js
-      buildCommand: docker build -t java-syntax-checker -f Dockerfile.java . 
+      buildCommand: docker build -t java-syntax-checker -f Dockerfile.java .
+      privileged: true # Enable privileged mode for Docker-in-Docker
+      volumes:
+        - source: /var/run/docker.sock
+          target: /var/run/docker.sock
+          type: bind 
