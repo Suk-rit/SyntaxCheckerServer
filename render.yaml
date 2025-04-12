@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: syntax-checker
+    env: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: API_KEY
+        sync: false # This will be set manually in Render dashboard
+    scaling:
+      minInstances: 1
+      maxInstances: 3
+    healthCheckPath: /health 
