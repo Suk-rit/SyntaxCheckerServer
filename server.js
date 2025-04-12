@@ -461,9 +461,8 @@ async function checkJavaSyntax(code) {
         await fs.writeFile(tempFile, code);
         
         try {
-            // Use dedicated Java Docker container for compilation
-            const dockerCmd = `docker run --rm -v "${tempDir}:/code" java-syntax-checker bash -c "cd /code && javac ${className}.java"`;
-            await execAsync(dockerCmd);
+            // Use javac directly for compilation
+            await execAsync(`javac "${tempFile}"`);
             
             await cleanupTempFile(tempFile);
             await cleanupTempFile(path.join(tempDir, `${className}.class`));
