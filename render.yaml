@@ -3,6 +3,7 @@ services:
     name: syntax-checker
     env: docker
     dockerfilePath: ./Dockerfile
+    plan: starter # Specify starter plan which supports Docker
     envVars:
       - key: PORT
         value: 3000
@@ -11,4 +12,8 @@ services:
     scaling:
       minInstances: 1
       maxInstances: 3
-    healthCheckPath: /health 
+    healthCheckPath: /health
+    docker:
+      runtime: runc
+      command: node server.js
+      buildCommand: docker build -t java-syntax-checker -f Dockerfile.java . 
