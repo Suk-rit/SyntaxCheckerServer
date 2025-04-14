@@ -242,82 +242,249 @@ function adjustErrorLineNumbers(error, language, hasWrapper) {
     return error;
 }
 
-// Endpoint to check syntax
+// Function to execute JavaScript code
+async function executeJavaScript(code) {
+    const tempFile = path.join(tempDir, `js_${Date.now()}.js`);
+    try {
+        // Write the code directly to file
+        await fs.writeFile(tempFile, code);
+        
+        // Execute the code
+        const { stdout, stderr } = await execAsync(`node "${tempFile}"`);
+        await cleanupTempFile(tempFile);
+
+        if (stderr) {
+            return { success: false, error: stderr };
+        }
+
+        return {
+            success: true,
+            output: stdout || 'Code executed successfully with no output'
+        };
+    } catch (error) {
+        await cleanupTempFile(tempFile);
+        return { success: false, error: error.message };
+    }
+}
+
+// Function to execute Python code
+async function executePython(code) {
+    const tempFile = path.join(tempDir, `python_${Date.now()}.py`);
+    try {
+        await fs.writeFile(tempFile, code);
+        const options = {
+            mode: 'text',
+            pythonPath: 'python3',
+            pythonOptions: ['-u'],
+        };
+        return new Promise((resolve) => {
+            let output = [];
+            let pyshell = new PythonShell(tempFile, options);
+            
+            pyshell.on('message', (message) => {
+                output.push(message);
+            });
+            
+            pyshell.end((err) => {
+                cleanupTempFile(tempFile);
+                if (err) {
+                    resolve({ success: false, error: err.message });
+                } else {
+                    resolve({ success: true, output: output.join('\n') || 'Code executed successfully with no output' });
+                }
+            });
+        });
+    } catch (error) {
+        await cleanupTempFile(tempFile);
+        return { success: false, error: error.message };
+    }
+}
+
+// Function to execute Java code
+async function executeJava(code) {
+    let javaFile = null;
+    let classFile = null;
+    
+    try {
+        // Extract the public class name from the code if it exists
+        const publicClassMatch = code.match(/public\s+class\s+(\w+)/);
+        const className = publicClassMatch ? publicClassMatch[1] : `Solution_${Date.now()}`;
+        javaFile = path.join(tempDir, `${className}.java`);
+        classFile = path.join(tempDir, `${className}.class`);
+        
+        // If code doesn't contain a class definition, wrap it in a class
+        const wrappedCode = code.includes('class') ? code : `
+public class ${className} {
+    public static void main(String[] args) {
+        ${code}
+    }
+}`;
+
+        // Write the code to a file
+        await fs.writeFile(javaFile, wrappedCode);
+
+        // Compile using Docker
+        await execAsync(`docker run --rm -v "${tempDir}:/code" -w /code openjdk:11 javac /code/$(basename "${javaFile}")`);
+
+        // Run using Docker
+        const { stdout, stderr } = await execAsync(`docker run --rm -v "${tempDir}:/code" -w /code openjdk:11 java -cp /code ${className}`);
+
+        // Cleanup
+        await cleanupTempFile(javaFile);
+        await cleanupTempFile(classFile);
+
+        if (stderr) {
+            return { success: false, error: stderr };
+        }
+
+        return {
+            success: true,
+            output: stdout || 'Code executed successfully with no output'
+        };
+    } catch (error) {
+        // Cleanup on error
+        if (javaFile) await cleanupTempFile(javaFile);
+        if (classFile) await cleanupTempFile(classFile);
+        return { success: false, error: error.message };
+    }
+}
+
+// Function to execute C++ code
+async function executeCPP(code) {
+    const tempFile = path.join(tempDir, `cpp_${Date.now()}`);
+    const sourceFile = `${tempFile}.cpp`;
+    const executableFile = `${tempFile}.out`;
+    
+    try {
+        await fs.writeFile(sourceFile, code);
+        await execAsync(`g++ -std=c++20 "${sourceFile}" -o "${executableFile}"`);
+        const { stdout } = await execAsync(`"${executableFile}"`);
+        
+        await cleanupTempFile(sourceFile);
+        await cleanupTempFile(executableFile);
+        
+        return { success: true, output: stdout || 'Code executed successfully with no output' };
+    } catch (error) {
+        await cleanupTempFile(sourceFile);
+        await cleanupTempFile(executableFile);
+        return { success: false, error: error.message };
+    }
+}
+
+// Function to execute C code
+async function executeC(code) {
+    const tempFile = path.join(tempDir, `c_${Date.now()}`);
+    const sourceFile = `${tempFile}.c`;
+    const executableFile = `${tempFile}.out`;
+    
+    try {
+        await fs.writeFile(sourceFile, code);
+        await execAsync(`gcc "${sourceFile}" -o "${executableFile}"`);
+        const { stdout } = await execAsync(`"${executableFile}"`);
+        
+        await cleanupTempFile(sourceFile);
+        await cleanupTempFile(executableFile);
+        
+        return { success: true, output: stdout || 'Code executed successfully with no output' };
+    } catch (error) {
+        await cleanupTempFile(sourceFile);
+        await cleanupTempFile(executableFile);
+        return { success: false, error: error.message };
+    }
+}
+
+// Modify the check-syntax endpoint
 app.post('/check-syntax', authenticateRequest, async (req, res) => {
-    const { code, language } = req.body;
+    let { code, language } = req.body;
 
     if (!code || !language) {
         return res.status(400).json({ 
-            error: 'Code and language are required',
-            help: 'Please provide both code and language parameters.'
+            error: 'Both code and language are required' 
         });
     }
 
-    // Check code size
-    if (code.length > 1000000) { // 1MB limit
-        return res.status(400).json({
-            error: 'Code size exceeds maximum limit of 1MB',
-            help: 'Please reduce the size of your code snippet.'
-        });
+    // Ensure code is a string and handle any potential encoding issues
+    try {
+        code = decodeURIComponent(code);
+    } catch (e) {
+        // If decoding fails, use the original code
+        code = String(code);
     }
 
-    // Normalize language
     const normalizedLang = normalizeLanguage(language);
     if (!normalizedLang) {
         return res.status(400).json({ 
-            error: 'Unsupported language',
-            supported: Object.keys(LANGUAGE_ALIASES),
-            help: 'Please use one of the supported language identifiers.'
+            error: 'Unsupported language' 
         });
     }
 
     try {
-        const hasWrapper = !code.includes('main(') && !code.includes('class');
-        const wrappedCode = wrapCodeSnippet(code, normalizedLang);
-        let result;
-        
+        let syntaxResult;
+        let executionResult = null;
+
+        // First check syntax
         switch (normalizedLang) {
             case 'javascript':
-                result = checkJavaScriptSyntax(wrappedCode);
+                syntaxResult = checkJavaScriptSyntax(code);
+                if (syntaxResult.valid) {
+                    executionResult = await executeJavaScript(code);
+                }
                 break;
             case 'python':
-                result = await checkPythonSyntax(wrappedCode);
+                syntaxResult = await checkPythonSyntax(code);
+                if (syntaxResult.valid) {
+                    executionResult = await executePython(code);
+                }
                 break;
             case 'java':
-                result = await checkJavaSyntax(wrappedCode);
+                syntaxResult = await checkJavaSyntax(code);
+                if (syntaxResult.valid) {
+                    executionResult = await executeJava(code);
+                }
                 break;
             case 'cpp':
-                result = await checkCPPSyntax(wrappedCode);
+                syntaxResult = await checkCPPSyntax(code);
+                if (syntaxResult.valid) {
+                    executionResult = await executeCPP(code);
+                }
                 break;
             case 'c':
-                result = await checkCSyntax(wrappedCode);
+                syntaxResult = await checkCSyntax(code);
+                if (syntaxResult.valid) {
+                    executionResult = await executeC(code);
+                }
                 break;
             default:
-                return res.status(400).json({ 
-                    error: 'Unsupported language',
-                    supported: Object.keys(LANGUAGE_ALIASES),
-                    help: 'Please use one of the supported language identifiers.'
-                });
+                return res.status(400).json({ error: 'Unsupported language' });
         }
 
-        // Adjust error line numbers if we wrapped the code
-        if (!result.valid && hasWrapper) {
-            result = adjustErrorLineNumbers(result, normalizedLang, hasWrapper);
-        }
-
-        // Add language info to response
-        result.language = {
-            requested: language,
-            normalized: normalizedLang
+        // Prepare the response
+        const response = {
+            valid: syntaxResult.valid,
+            message: syntaxResult.message,
+            error: syntaxResult.error,
+            details: syntaxResult.details,
+            language: {
+                requested: language,
+                normalized: normalizedLang
+            }
         };
 
-        res.json(result);
+        // Add execution result if syntax was valid
+        if (syntaxResult.valid && executionResult) {
+            response.execution = {
+                success: executionResult.success,
+                output: executionResult.success ? executionResult.output : null,
+                error: executionResult.success ? null : executionResult.error
+            };
+        }
+
+        res.json(response);
     } catch (error) {
-        console.error('Syntax check error:', error);
-        res.status(500).json({
+        console.error('Error processing request:', error);
+        res.status(500).json({ 
             error: 'Internal server error',
-            details: error.message,
-            help: 'Please try again or contact support if the problem persists.'
+            details: error.message 
         });
     }
 });
@@ -443,50 +610,27 @@ async function checkPythonSyntax(code) {
     }
 }
 
-// Java syntax checker
+// Function to check Java syntax
 async function checkJavaSyntax(code) {
-    const timestamp = Date.now();
-    const className = `Solution_${timestamp}`;
-    const tempFile = path.join(tempDir, `${className}.java`);
-    
     try {
-        // Check code size
-        if (code.length > 1000000) { // 1MB limit
-            return {
-                valid: false,
-                error: 'Code size exceeds maximum limit of 1MB'
-            };
-        }
-
+        // Extract the public class name from the code if it exists
+        const publicClassMatch = code.match(/public\s+class\s+(\w+)/);
+        const className = publicClassMatch ? publicClassMatch[1] : `Check_${Date.now()}`;
+        const tempFile = path.join(tempDir, `${className}.java`);
+        
         await fs.writeFile(tempFile, code);
         
-        try {
-            // Use javac directly for compilation
-            await execAsync(`javac "${tempFile}"`);
-            
-            await cleanupTempFile(tempFile);
-            await cleanupTempFile(path.join(tempDir, `${className}.class`));
-            return { valid: true, message: 'Syntax is valid' };
-        } catch (error) {
-            const errorInfo = {
-                valid: false,
-                error: error.stderr,
-                details: error.stderr.split('\n').map(line => {
-                    const match = line.match(/:(\d+):/);
-                    return match ? {
-                        line: parseInt(match[1]),
-                        message: line.trim()
-                    } : null;
-                }).filter(Boolean)
-            };
-            await cleanupTempFile(tempFile);
-            return errorInfo;
-        }
-    } catch (error) {
+        // Use Docker to compile the Java file
+        await execAsync(`docker run --rm -v "${tempDir}:/code" -w /code openjdk:11 javac /code/$(basename "${tempFile}")`);
+        
         await cleanupTempFile(tempFile);
-        return {
-            valid: false,
-            error: error.message
+        await cleanupTempFile(tempFile.replace('.java', '.class'));
+        return { valid: true, message: 'Syntax is valid' };
+    } catch (error) {
+        return { 
+            valid: false, 
+            error: error.message,
+            details: []
         };
     }
 }
@@ -676,10 +820,10 @@ async function checkCSyntax(code) {
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-    res.json({ status: 'healthy' });
+    res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
 // Start server
 app.listen(PORT, () => {
-    console.log(`Syntax checker server running on port ${PORT}`);
+    console.log(`Server is running on port ${PORT}`);
 }); 
